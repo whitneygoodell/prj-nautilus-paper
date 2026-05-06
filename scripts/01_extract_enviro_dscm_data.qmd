@@ -1,0 +1,126 @@
+This script extracts the environmental data from dropcam sensor files, pulling data for the timecodes associated with the video filenames of nautilus observations.
+
+```{r}
+library(tidyverse)
+library(xml2)
+library(readxl)
+library(lubridate)
+
+# --- CONFIGURATION ---
+parent_dir <- "C:/Users/wgoodell/National Geographic Dropbox/Dropcam Data/Pristine Seas Dropcam Data"
+excel_path <- "G:/.shortcut-targets-by-id/16vjFvzPNgx8MuRqNqZj-Uqc08bkAVKqX/Pristine Seas/SCIENCE/projects/prj-nautilus-paper/data/Tator_All_Media_summary_Nautilus_20260505.xlsx"
+output_path <- "G:/.shortcut-targets-by-id/16vjFvzPNgx8MuRqNqZj-Uqc08bkAVKqX/Pristine Seas/SCIENCE/projects/prj-nautilus-paper/data/Tator_nautilus_obs_env_data_extraction.csv"
+
+
+# Helper function to safely read only the relevant xml files for each observation and extract its time
+safe_read_xml_time <- function(filepath) {
+  xml <- purrr::possibly(read_xml, otherwise = NULL)(filepath)
+  if (is.null(xml)) {
+    warning(paste("\n>>> SKIPPING BROKEN/CORRUPT XML FILE:", filepath, "\n"))
+    return(NA)
+  }
+  created <- xml_find_first(xml, ".//d1:CreationDate") %>% xml_attr("value")
+  as.POSIXct(created, format="%Y-%m-%dT%H:%M:%S", tz="UTC")
+}
+
+# 1. READ EXCEL AND EXTRACT DEPLOYMENT IDs
+obs <- read_excel(excel_path, sheet = 2)
+
+# Extract deployment ID (e.g., getting "FJI_2025_dscm_08" from "FJI_2025_dscm_08_C236.MP4")
+# Look for everything before the "_C" followed by numbers
+obs <- obs %>%
+  mutate(deployment_id = str_extract(media, "^.*?(?=_C\\d+)"))
+
+# 2. GET FILE PATHS ONLY (DO NOT READ CONTENTS; don't trigger cloud-sync)
+# Just the text paths, doesn't trigger downloads
+all_files <- list.files(parent_dir, recursive = TRUE, full.names = TRUE)
+xml_files <- all_files[str_detect(toupper(all_files), "\\.XML$") & !str_detect(basename(all_files), "^\\._")]
+
+# 3. PROCESS EACH DEPLOYMENT
+process_deployment <- function(dep_id, dep_obs_data) {
+  print(paste("Processing deployment:", dep_id))
+  
+  dep_sensor_pattern <- paste0(dep_id, "_Sensor\\.csv")
+  sensor_file <- all_files[str_detect(all_files, regex(dep_sensor_pattern, ignore_case = TRUE))]
+  
+  if (length(sensor_file) == 0) return(dep_obs_data %>% mutate(Depth = NA)) 
+  
+  dep_xml_paths <- sort(xml_files[str_detect(toupper(xml_files), toupper(dep_id))])
+  if (length(dep_xml_paths) == 0) return(dep_obs_data)
+  
+  # -- CLUSTER DETECTION --
+  # to find which xml file is associated with the deployment's start (rather than function tests)
+first_20_paths <- head(dep_xml_paths, 20)
+  file_times <- file.info(first_20_paths)$mtime
+  gaps <- as.numeric(difftime(lead(file_times), file_times, units = "mins"))
+  large_gaps <- which(gaps > 30)
+  
+  if (length(large_gaps) > 0) {
+    anchor_index <- max(large_gaps) + 1
+  } else {
+    anchor_index <- 1
+    warning(paste("FLAG FOR MANUAL CHECK: No large time gap detected for deployment:", dep_id))
+  }
+  
+  anchor_path <- dep_xml_paths[anchor_index]
+  anchor_time <- safe_read_xml_time(anchor_path)
+  
+  if (is.na(anchor_time)) stop(paste("Anchor file for", dep_id, "is corrupted."))
+  
+  # Read and Sync Sensor Data
+  sensor_data <- read_csv(sensor_file[1], show_col_types = FALSE) %>%
+    rename(sensor_sec = `Dropcam Timestamp (s)`)
+  
+  sensor_offset <- as.numeric(anchor_time) - sensor_data$sensor_sec[1]
+  
+  sensor_data <- sensor_data %>% 
+    mutate(real_time = as.POSIXct(sensor_sec + sensor_offset, origin="1970-01-01", tz="UTC"))
+  
+  # --- OPTIMIZATION: READ REQUIRED XMLS ONCE ---
+  needed_xml_names <- unique(str_replace(toupper(dep_obs_data$media), "\\.MP4", ".XML"))
+  
+  vid_times <- tibble(xml_name = needed_xml_names) %>%
+    mutate(
+      path = map_chr(xml_name, function(x) {
+        match <- dep_xml_paths[str_detect(toupper(dep_xml_paths), x)]
+        if (length(match) > 0) return(match[1]) else return(NA_character_)
+      }),
+      start_time = map_dbl(path, function(p) {
+        if (!is.na(p)) as.numeric(safe_read_xml_time(p)) else NA_real_
+      }),
+      start_time = as.POSIXct(start_time, origin="1970-01-01", tz="UTC")
+    )
+  
+  # --- EXTRACT OBSERVATIONS ---
+  extract_for_row <- function(media_name, frame_number) {
+    target_xml_name <- str_replace(toupper(media_name), "\\.MP4", ".XML")
+    target_time <- vid_times$start_time[vid_times$xml_name == target_xml_name]
+    
+    if (length(target_time) == 0 || is.na(target_time)) return(NULL)
+    
+    time_in_vid_sec <- ifelse(is.na(frame_number), 0, as.numeric(frame_number) / 30)
+    abs_time <- target_time + time_in_vid_sec
+    
+    sensor_data %>%
+      filter(abs(real_time - abs_time) <= 2) %>%
+      slice(1) %>%
+      select(`Depth (meters)`, `DO Temperature (celsius)`, `DO Saturation (percent)`, 
+             `DO Concentration Salin Comp (mol/L)`, `DO Concentration Salin Uncomp (mol/L)`)
+  }
+  
+  dep_obs_data %>%
+    rowwise() %>%
+    mutate(env_data = list(extract_for_row(media, frame))) %>%
+    unnest(env_data, keep_empty = TRUE, names_repair = "unique") %>%
+    ungroup()
+}
+
+# 4. EXECUTE
+final_results <- obs %>%
+  group_split(deployment_id) %>%
+  map_dfr(~ process_deployment(.x$deployment_id[1], .x))
+
+write_csv(final_results, output_path)
+print("Done!")
+```
+
