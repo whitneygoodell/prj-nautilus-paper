@@ -1,0 +1,81 @@
+---
+title: "01 Data Cleaning"
+subtitle: "Cleaning nautilus observation data for analysis"
+author: "Whitney Goodell"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: show
+    code-tools: true
+    theme: cosmo
+    fig-width: 10
+    fig-height: 7
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+  cache: false
+---
+
+# Overview
+
+This script cleans the data for nautilus observations across PS deep sea methods.  
+This simplifies column names.  
+
+
+```{r setup, message=FALSE}
+#| label: setup
+
+library(tidyverse)
+library(janitor)
+library(readxl)
+library(PristineSeasR2)
+
+ps_paths <- ps_science_paths()
+exp_path <- file.path(ps_paths$projects, "prj-nautilus-paper")
+
+# where data comes from and where it goes
+raw_dir       <- file.path(exp_path, "data/raw")
+processed_dir <- file.path(exp_path, "data/processed")
+
+# load data
+raw_data <- read_csv(file.path(raw_dir, "PS Nautilus observations metadata - obs_20260505.csv"))
+```
+
+```{r}
+#| label: clean-names
+
+# 1. Clean names and select/rename core columns
+clean_data <- raw_data %>%
+  clean_names() %>%
+  rename(
+    depth = depth_m,
+    temp = temp_c,
+    do_sat = do_sat,
+    do_conc = do_conc_mmol_l, # Note: this is umol/L
+    lon = long
+  ) %>%
+  # 2. Treat species labels as distinct taxonomic units
+  mutate(species = replace_na(species, "Unidentified Nautilus")) %>%
+  
+  # 3. Add regional categorization
+  mutate(region = case_when(
+    country %in% c("Palau", "PNG", "Solomons") ~ "Equatorial",
+    country %in% c("Vanuatu", "Fiji", "Rotuma") ~ "South Pacific",
+    TRUE ~ "Other"
+  )) %>%
+  
+  # 4. Flag for environmental data; to filter out for environmental exploration
+  mutate(has_env_data = !is.na(temp) & !is.na(do_conc))
+
+# 5. Save cleaned version for downstream qmds
+write_csv(clean_data, (file.path(processed_dir,"nautilus_data_cleaned.csv")))
+
+# Quick look at the cleaned structure
+glimpse(clean_data)
+
+```
+
