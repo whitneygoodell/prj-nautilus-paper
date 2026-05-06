@@ -1,0 +1,128 @@
+---
+title: "02 Sampling profile"
+subtitle: "Summarizing sampling characteristics of nautilus observations"
+author: "Whitney Goodell"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: show
+    code-tools: true
+    theme: cosmo
+    fig-width: 10
+    fig-height: 7
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+  cache: false
+---
+
+# Overview
+
+This script gives an idea of the ocean profile of nautilus observations.  
+
+```{r setup, message=FALSE}
+#| label: setup
+
+library(tidyverse)
+library(janitor)
+library(readxl)
+library(PristineSeasR2)
+
+ps_paths <- ps_science_paths()
+exp_path <- file.path(ps_paths$projects, "prj-nautilus-paper")
+
+# where data comes from and where it goes
+raw_dir       <- file.path(exp_path, "data/raw")
+processed_dir <- file.path(exp_path, "data/processed")
+
+# Load the cleaned data
+df_clean <- read_csv(file.path(processed_dir, "nautilus_data_cleaned.csv"))
+```
+
+# Vertical sampling profile  
+```{r}
+#| label: vertical-sampling-profile
+
+# 0. Prep the data: Force X-axis order and Title Case for display
+df_clean <- df_clean %>%
+  mutate(
+    method = case_when(
+      method == "dropcam" ~ "Dropcam",
+      method == "sub"     ~ "Sub",
+      method == "rov"     ~ "ROV",
+      TRUE ~ method
+    ),
+    method = factor(method, levels = c("Dropcam", "Sub", "ROV")),
+    baited = str_to_title(baited) # Capitalizes 'baited' and 'unbaited'
+  )
+
+# 1. Calculate n-counts for labels above boxplots
+# This step is cleanest way to get "n = X" labels in the plot without cluttering the main data.
+n_labels <- df_clean %>%
+  group_by(method) %>%
+  summarise(
+    count = n(),
+    # label at top of plot
+    y_pos = 0 
+  )
+
+
+# 2. Create depth profile plot
+ggplot(df_clean, aes(x = method, y = depth)) +
+  # boxplot color-coded by baiting status
+  # outlier.shape = NA - will use geom_jitter to show all points, so NA will prevent double-counting
+  geom_boxplot(aes(fill = baited), width = 0.6, alpha = 0.7, outlier.shape = NA) +
+  
+  # Individual observations
+  geom_jitter(color = "darkblue", alpha = 0.5, width = 0.1, size = 3) +
+  
+  # Labels: n = X above boxes
+  geom_text(data = n_labels, aes(y = y_pos, label = paste0("n = ", count)), 
+            vjust = 2, fontface = "bold", size = 5, color = "navyblue") +
+  
+  # depth profile plot, with shallow (0 m) at top
+  scale_y_reverse(limits = c(600, 0), breaks = seq(0, 600, 100)) +
+  
+  # Manual colors for Baited vs Unbaited
+  scale_fill_manual(values = c("Baited" = "gold", "Unbaited" = "lightgreen")) +
+  
+  # Labels and title
+  labs(
+    x = NULL,
+    y = "Depth (m)",
+    fill = "Baited"
+  ) +
+  theme_minimal() +
+  theme(
+    # theme and font refinements
+    axis.title.x = element_text(size = 18, face = "bold", margin = margin(t = 20)),
+    axis.title.y = element_text(size = 18, face = "bold", margin = margin(r = 20)),
+    axis.text.x  = element_text(size = 16, color = "black", face = "bold"),
+    axis.text.y  = element_text(size = 14, color = "black"),
+    
+    # Legend formatting
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text  = element_text(size = 12),
+    legend.position = "right",
+    
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    plot.title = element_text(face = "bold", size = 16)
+  )
+```
+
+
+# Species distribution table  
+```{r}
+#| label: spp-distrib-table 
+
+df_clean %>%
+  group_by(country, species) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pivot_wider(names_from = country, values_from = n, values_fill = 0) %>%
+  knitr::kable(caption = "Species occurrence counts across Pacific EEZs")
+```
